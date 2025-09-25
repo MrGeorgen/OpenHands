@@ -7,6 +7,9 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+
+API_BASE = "https://codeberg.org/api/v1"
+
 def _require_env(name: str) -> str:
     value = os.environ.get(name)
     if not value:
@@ -31,13 +34,45 @@ os.environ["FORGEJO_TOKEN"] = FORGEJO_TOKEN
 def load_processed():
     try:
         with open(PROCESSED_FILE) as f:
-            return set(json.load(f))
-    except:
+            data = json.load(f)
+            if isinstance(data, list):
+                return {str(item) for item in data}
+            return {str(data)}
+    except (json.JSONDecodeError, OSError) as exc:
+        print(f"⚠️  Unable to load {PROCESSED_FILE}: {exc}. Starting with empty processed set.")
         return set()
+
 
 def save_processed(processed):
     with open(PROCESSED_FILE, 'w') as f:
-        json.dump(list(processed), f)
+        json.dump(sorted(processed), f, indent=2)
+
+
+def ensure_processed_log_exists(processed):
+    processed_path = Path(PROCESSED_FILE)
+    if not processed_path.exists():
+        save_processed(processed)
+
+
+def tail_log(log_path: str, max_lines: int = 40, max_chars: int = 4000) -> str:
+    try:
+        with open(log_path, 'r') as fh:
+            lines = fh.readlines()
+    except OSError as exc:
+        return f"(unable to read log file: {exc})"
+
+    snippet = ''.join(lines[-max_lines:])
+    if len(snippet) > max_chars:
+        snippet = snippet[-max_chars:]
+        snippet = snippet.lstrip('\n')
+    return snippet.strip()
+
+
+def post_issue_comment(issue_num: str, body: str) -> None:
+    url = f"{API_BASE}/repos/{REPO}/issues/{issue_num}/comments"
+    headers = {'Authorization': f'token {FORGEJO_TOKEN}'}
+    response = httpx.post(url, json={'body': body}, headers=headers, timeout=30)
+    response.raise_for_status()
 
 def check_issues():
     """Check for issues with the specified label"""
@@ -91,6 +126,7 @@ def estimate_cost(issue_complexity="medium"):
 
 def main():
     processed = load_processed()
+    ensure_processed_log_exists(processed)
     workspace_base = Path(os.environ.get("WORKSPACE_BASE") or Path.home() / "workspace")
     workspace_base = workspace_base.expanduser()
     workspace_base.mkdir(parents=True, exist_ok=True)
@@ -154,7 +190,7 @@ def main():
                             env=env,  # Use modified environment with WORKSPACE_BASE
                             capture_output=True,
                             text=True,
-                            timeout=1800  # No timeout - let it run to completion
+                            timeout=None  # No timeout - let it run to completion
                         )
 
                         # Save full output to log file
@@ -170,17 +206,94 @@ def main():
                             processed.add(issue_num)
                             save_processed(processed)
                             print(f"✅ Successfully processed issue #{issue_num}")
-                            print(f"   A PR should be created soon...")
+
+                            # Create PR for the resolved issue
+                            print(f"   Creating PR for issue #{issue_num}...")
+                            pr_cmd = [
+                                'poetry', 'run', 'python', '-m',
+                                'openhands.resolver.send_pull_request',
+                                '--selected-repo', REPO,
+                                '--issue-number', issue_num,
+                                '--token', FORGEJO_TOKEN,
+                                '--username', 'johba',
+                                '--base-domain', 'codeberg.org',
+                                '--pr-type', 'ready',  # Create a ready PR (not draft)
+                                '--llm-model', 'anthropic/claude-3-5-sonnet-latest',
+                                '--llm-api-key', os.environ.get('LLM_API_KEY'),
+                                '--output-dir', f'output/issue_{issue_num}'
+                            ]
+
+                            try:
+                                pr_result = subprocess.run(
+                                    pr_cmd,
+                                    cwd='/home/johba/OpenHands',
+                                    env=env,
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=300  # 5 minute timeout for PR creation
+                                )
+
+                                if pr_result.returncode == 0:
+                                    print(f"   ✅ PR created successfully!")
+                                    # Extract PR URL from output if available
+                                    if 'created:' in pr_result.stdout:
+                                        for line in pr_result.stdout.split('\n'):
+                                            if 'created:' in line:
+                                                print(f"   {line.strip()}")
+                                                break
+                                else:
+                                    print(f"   ⚠️ PR creation failed (exit code: {pr_result.returncode})")
+                                    if pr_result.stderr:
+                                        print(f"   Error: {pr_result.stderr[:500]}")
+
+                                # Save PR creation log
+                                pr_log_file = f'output/issue_{issue_num}_pr_log.txt'
+                                with open(pr_log_file, 'w') as f:
+                                    f.write(f"PR Command: {' '.join(pr_cmd)}\n")
+                                    f.write(f"Return code: {pr_result.returncode}\n\n")
+                                    f.write("STDOUT:\n")
+                                    f.write(pr_result.stdout)
+                                    f.write("\nSTDERR:\n")
+                                    f.write(pr_result.stderr)
+
+                            except subprocess.TimeoutExpired:
+                                print(f"   ⚠️ PR creation timed out after 5 minutes")
+                            except Exception as e:
+                                print(f"   ⚠️ PR creation error: {str(e)}")
                         else:
                             print(f"❌ Failed to process issue #{issue_num} (exit code: {result.returncode})")
                             if result.stderr:
                                 print(f"   Error (last 1000 chars):")
                                 print(f"   {result.stderr[-1000:]}")
                             print(f"   Full log saved to: {log_file}")
+                            comment_body = (
+                                f"OpenHands attempt failed for issue #{issue_num} with exit code {result.returncode}.\n"
+                                f"Log file: `{log_file}`\n\n"
+                            )
+                            snippet = tail_log(log_file)
+                            if snippet:
+                                comment_body += f"```\n{snippet}\n```"
+                            try:
+                                post_issue_comment(issue_num, comment_body)
+                                print("   Posted failure summary as issue comment")
+                            except Exception as comment_error:
+                                print(f"   ⚠️  Failed to post issue comment: {comment_error}")
 
                     except subprocess.TimeoutExpired:
                         print(f"❌ Timeout processing issue #{issue_num} after 10 minutes")
                         print(f"   This might be a complex issue - check {log_file} for details")
+                        comment_body = (
+                            f"OpenHands attempt timed out after 10 minutes for issue #{issue_num}.\n"
+                            f"Log file: `{log_file}`\n\n"
+                        )
+                        snippet = tail_log(log_file)
+                        if snippet:
+                            comment_body += f"```\n{snippet}\n```"
+                        try:
+                            post_issue_comment(issue_num, comment_body)
+                            print("   Posted timeout summary as issue comment")
+                        except Exception as comment_error:
+                            print(f"   ⚠️  Failed to post issue comment: {comment_error}")
             else:
                 print(f"No new issues to process (already processed: {len(processed)} issues)")
 
