@@ -279,12 +279,22 @@ class IssueResolver:
         logger.info('-' * 30)
         obs: Observation
 
-        action = CmdRunAction(command='cd /workspace')
+        # In local runtime, use the actual workspace path instead of /workspace
+        workspace_path = '/workspace'
+        runtime_class_name = runtime.__class__.__name__ if hasattr(runtime, '__class__') else 'Unknown'
+        logger.info(f'Runtime class: {runtime_class_name}')
+        if hasattr(runtime, '__class__') and 'LocalRuntime' in runtime.__class__.__name__:
+            workspace_path = self.workspace_base
+            logger.info(f'Using local workspace path: {workspace_path}')
+        else:
+            logger.info(f'Using docker workspace path: {workspace_path}')
+
+        action = CmdRunAction(command=f'cd {workspace_path}')
         logger.info(action, extra={'msg_type': 'ACTION'})
         obs = runtime.run_action(action)
         logger.info(obs, extra={'msg_type': 'OBSERVATION'})
         if not isinstance(obs, CmdOutputObservation) or obs.exit_code != 0:
-            raise RuntimeError(f'Failed to change directory to /workspace.\n{obs}')
+            raise RuntimeError(f'Failed to change directory to {workspace_path}.\n{obs}')
 
         if self.platform == ProviderType.GITLAB and self.GITLAB_CI:
             action = CmdRunAction(command='sudo chown -R 1001:0 /workspace/*')
@@ -323,13 +333,23 @@ class IssueResolver:
         logger.info('-' * 30)
         obs: Observation
 
-        action = CmdRunAction(command='cd /workspace')
+        # In local runtime, use the actual workspace path instead of /workspace
+        workspace_path = '/workspace'
+        runtime_class_name = runtime.__class__.__name__ if hasattr(runtime, '__class__') else 'Unknown'
+        logger.info(f'Runtime class: {runtime_class_name}')
+        if hasattr(runtime, '__class__') and 'LocalRuntime' in runtime.__class__.__name__:
+            workspace_path = self.workspace_base
+            logger.info(f'Using local workspace path: {workspace_path}')
+        else:
+            logger.info(f'Using docker workspace path: {workspace_path}')
+
+        action = CmdRunAction(command=f'cd {workspace_path}')
         logger.info(action, extra={'msg_type': 'ACTION'})
         obs = runtime.run_action(action)
         logger.info(obs, extra={'msg_type': 'OBSERVATION'})
         if not isinstance(obs, CmdOutputObservation) or obs.exit_code != 0:
             raise RuntimeError(
-                f'Failed to change directory to /workspace. Observation: {obs}'
+                f'Failed to change directory to {workspace_path}. Observation: {obs}'
             )
 
         action = CmdRunAction(command='git config --global core.pager ""')
@@ -340,7 +360,7 @@ class IssueResolver:
             raise RuntimeError(f'Failed to set git config. Observation: {obs}')
 
         action = CmdRunAction(
-            command='git config --global --add safe.directory /workspace'
+            command=f'git config --global --add safe.directory {workspace_path}'
         )
         logger.info(action, extra={'msg_type': 'ACTION'})
         obs = runtime.run_action(action)

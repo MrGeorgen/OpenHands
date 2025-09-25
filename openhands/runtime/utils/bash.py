@@ -245,11 +245,14 @@ class BashSession:
         _initial_window.kill()
 
         # Configure bash to use simple PS1 and disable PS2
+        # Escape newlines in PS1 for proper shell execution
+        escaped_ps1 = self.PS1.replace('\n', '\\n')
         self.pane.send_keys(
-            f'export PROMPT_COMMAND=\'export PS1="{self.PS1}"\'; export PS2=""'
+            f'export PS1=$\'{escaped_ps1}\'; export PS2=""'
         )
         time.sleep(0.1)  # Wait for command to take effect
-        self._clear_screen()
+        # Skip initial clear screen as it causes issues with first command
+        # self._clear_screen()
 
         # Store the last command for interactive input handling
         self.prev_status: BashCommandStatus | None = None
@@ -296,8 +299,9 @@ class BashSession:
     def _clear_screen(self) -> None:
         """Clear the tmux pane screen and history."""
         self.pane.send_keys('C-l', enter=False)
-        time.sleep(0.1)
+        time.sleep(0.2)  # Increased sleep to ensure C-l is processed
         self.pane.cmd('clear-history')
+        time.sleep(0.1)  # Additional sleep after clear-history
 
     def _get_command_output(
         self,
@@ -450,8 +454,9 @@ class BashSession:
 
     def _ready_for_next_command(self) -> None:
         """Reset the content buffer for a new command."""
-        # Clear the current content
-        self._clear_screen()
+        # Skip clearing screen as it causes issues with command execution
+        # The PS1 markers are sufficient for tracking command boundaries
+        pass
 
     def _combine_outputs_between_matches(
         self,

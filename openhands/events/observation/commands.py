@@ -37,22 +37,31 @@ class CmdOutputMetadata(BaseModel):
     @classmethod
     def to_ps1_prompt(cls) -> str:
         """Convert the required metadata into a PS1 prompt."""
+        # Build a PS1 that outputs valid JSON after shell evaluation
+        # We avoid using \u and \h directly in the JSON to prevent Unicode escape issues
+        # Instead, we use $(whoami) and $(hostname) which give the same information
         prompt = CMD_OUTPUT_PS1_BEGIN
-        json_str = json.dumps(
-            {
-                'pid': '$!',
-                'exit_code': '$?',
-                'username': r'\u',
-                'hostname': r'\h',
-                'working_dir': r'$(pwd)',
-                'py_interpreter_path': r'$(which python 2>/dev/null || echo "")',
-            },
-            indent=2,
-        )
-        # Make sure we escape double quotes in the JSON string
-        # So that PS1 will keep them as part of the output
-        prompt += json_str.replace('"', r'\"')
-        prompt += CMD_OUTPUT_PS1_END + '\n'  # Ensure there's a newline at the end
+        prompt += '{\n'
+        prompt += '  "pid": "'
+        prompt += '$!'
+        prompt += '",\n'
+        prompt += '  "exit_code": "'
+        prompt += '$?'
+        prompt += '",\n'
+        prompt += '  "username": "'
+        prompt += '$(whoami)'
+        prompt += '",\n'
+        prompt += '  "hostname": "'
+        prompt += '$(hostname)'
+        prompt += '",\n'
+        prompt += '  "working_dir": "'
+        prompt += '$(pwd)'
+        prompt += '",\n'
+        prompt += '  "py_interpreter_path": "'
+        prompt += "$(which python 2>/dev/null || echo '')"
+        prompt += '"\n'
+        prompt += '}'
+        prompt += '\n' + CMD_OUTPUT_PS1_END + '\n'
         return prompt
 
     @classmethod
