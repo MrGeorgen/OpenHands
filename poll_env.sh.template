@@ -1,0 +1,8 @@
+# Copy this file to poll_env.sh and fill in the real secrets before running.
+export FORGEJO_TOKEN="your_forgejo_token"
+export LLM_API_KEY="your_llm_api_key"
+# Example models: anthropic/claude-3-5-sonnet-latest, openai/gpt-4o, etc.
+export LLM_MODEL="anthropic/claude-3-5-sonnet-latest"
+
+# Optional: override the workspace base directory used by poll_and_resolve.py
+# export WORKSPACE_BASE="$HOME/workspace"

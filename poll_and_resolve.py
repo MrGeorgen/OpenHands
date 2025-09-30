@@ -4,8 +4,11 @@ import time
 import subprocess
 import httpx
 import json
+import re
+import shutil
 from datetime import datetime
 from pathlib import Path
+from threading import Thread
 
 
 API_BASE = "https://codeberg.org/api/v1"
@@ -23,6 +26,7 @@ LLM_API_KEY = _require_env("LLM_API_KEY")
 LLM_MODEL = _require_env("LLM_MODEL")
 REPO = "johba/harb"
 PROCESSED_FILE = ".processed_issues.json"
+REPO_ROOT = Path(__file__).resolve().parent
 POLL_INTERVAL = 300  # 5 minutes
 LABEL_TO_WATCH = "fix-me"  # Change this to your preferred label
 
@@ -30,6 +34,114 @@ LABEL_TO_WATCH = "fix-me"  # Change this to your preferred label
 os.environ["LLM_API_KEY"] = LLM_API_KEY
 os.environ["LLM_MODEL"] = LLM_MODEL
 os.environ["FORGEJO_TOKEN"] = FORGEJO_TOKEN
+
+
+def sanitize_command(cmd):
+    sensitive_flags = {"--token", "--llm-api-key"}
+    sanitized_parts = []
+    skip_next = False
+
+    for idx, part in enumerate(cmd):
+        if skip_next:
+            skip_next = False
+            continue
+
+        if part in sensitive_flags:
+            sanitized_parts.append(part)
+            if idx + 1 < len(cmd):
+                sanitized_parts.append("***")
+                skip_next = True
+        elif any(part.startswith(flag + "=") for flag in sensitive_flags):
+            flag, _ = part.split("=", 1)
+            sanitized_parts.append(f"{flag}=***")
+        else:
+            sanitized_parts.append(part)
+
+    return " ".join(sanitized_parts)
+
+
+ANSI_ESCAPE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
+
+
+def strip_ansi(value: str) -> str:
+    return ANSI_ESCAPE.sub("", value)
+
+
+def iso_timestamp(dt: datetime) -> str:
+    return dt.isoformat(timespec="seconds") + "Z"
+
+
+def run_logged_command(
+    cmd: list[str],
+    log_path: str,
+    cwd: str,
+    env: dict[str, str],
+    label: str,
+    timeout: float | None,
+) -> subprocess.CompletedProcess:
+    os.makedirs(os.path.dirname(log_path) or '.', exist_ok=True)
+    start_time = datetime.now()
+    sanitized = sanitize_command(cmd)
+    stdout_chunks: list[str] = []
+    stderr_chunks: list[str] = []
+
+    with open(log_path, 'w', encoding='utf-8') as fh:
+        fh.write(f"{label}: {sanitized}\n")
+        fh.write(f"Started: {iso_timestamp(start_time)}\n")
+        fh.flush()
+
+        proc = subprocess.Popen(
+            cmd,
+            cwd=cwd,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1
+        )
+
+        def consume(stream, prefix, buffer):
+            if stream is None:
+                return
+            for line in stream:
+                clean = strip_ansi(line.rstrip('\n'))
+                buffer.append(clean + '\n')
+                fh.write(f"[{prefix}] {clean}\n")
+                fh.flush()
+
+        threads = [
+            Thread(target=consume, args=(proc.stdout, 'stdout', stdout_chunks), daemon=True),
+            Thread(target=consume, args=(proc.stderr, 'stderr', stderr_chunks), daemon=True),
+        ]
+
+        for thread in threads:
+            thread.start()
+
+        try:
+            returncode = proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            for thread in threads:
+                thread.join()
+            end_time = datetime.now()
+            fh.write(f"Finished: {iso_timestamp(end_time)}\n")
+            fh.write("Result: timeout\n")
+            fh.flush()
+            raise
+
+        for thread in threads:
+            thread.join()
+
+        end_time = datetime.now()
+        fh.write(f"Finished: {iso_timestamp(end_time)}\n")
+        fh.write(f"Duration: {(end_time - start_time).total_seconds():.2f}s\n")
+        fh.write(f"Exit code: {returncode}\n")
+        fh.flush()
+
+    stdout_text = ''.join(stdout_chunks)
+    stderr_text = ''.join(stderr_chunks)
+    return subprocess.CompletedProcess(cmd, returncode, stdout_text, stderr_text)
+
 
 def load_processed():
     try:
@@ -61,10 +173,24 @@ def tail_log(log_path: str, max_lines: int = 40, max_chars: int = 4000) -> str:
     except OSError as exc:
         return f"(unable to read log file: {exc})"
 
-    snippet = ''.join(lines[-max_lines:])
+    error_markers = (
+        "Traceback (most recent call last)",
+        "ERROR:",
+        "Exception",
+    )
+
+    for idx, line in enumerate(lines):
+        if any(marker in line for marker in error_markers):
+            start = max(0, idx - 5)
+            end = min(len(lines), idx + max_lines)
+            snippet = ''.join(lines[start:end])
+            break
+    else:
+        snippet = ''.join(lines[-max_lines:])
+
     if len(snippet) > max_chars:
-        snippet = snippet[-max_chars:]
-        snippet = snippet.lstrip('\n')
+        snippet = snippet[:max_chars]
+
     return snippet.strip()
 
 
@@ -124,7 +250,13 @@ def estimate_cost(issue_complexity="medium"):
         model_key, {"simple": 0.20, "medium": 0.50, "complex": 1.00}
     )[issue_complexity]
 
+def ensure_prerequisites():
+    if shutil.which("tmux") is None:
+        raise RuntimeError("tmux is required but was not found in PATH. Install it (e.g. apt install tmux) before running.")
+
+
 def main():
+    ensure_prerequisites()
     processed = load_processed()
     ensure_processed_log_exists(processed)
     workspace_base = Path(os.environ.get("WORKSPACE_BASE") or Path.home() / "workspace")
@@ -184,23 +316,14 @@ def main():
 
                     # Run with timeout and better output capture
                     try:
-                        result = subprocess.run(
-                            cmd,
-                            cwd='/home/johba/OpenHands',
+                        result = run_logged_command(
+                            cmd=cmd,
+                            log_path=log_file,
+                            cwd=str(REPO_ROOT),
                             env=env,  # Use modified environment with WORKSPACE_BASE
-                            capture_output=True,
-                            text=True,
-                            timeout=None  # No timeout - let it run to completion
+                            label='Command',
+                            timeout=None,
                         )
-
-                        # Save full output to log file
-                        with open(log_file, 'w') as f:
-                            f.write(f"Command: {' '.join(cmd)}\n")
-                            f.write(f"Return code: {result.returncode}\n\n")
-                            f.write("STDOUT:\n")
-                            f.write(result.stdout)
-                            f.write("\nSTDERR:\n")
-                            f.write(result.stderr)
 
                         if result.returncode == 0:
                             processed.add(issue_num)
@@ -223,14 +346,16 @@ def main():
                                 '--output-dir', f'output/issue_{issue_num}'
                             ]
 
+                            pr_log_file = f'output/issue_{issue_num}_pr_log.txt'
+
                             try:
-                                pr_result = subprocess.run(
-                                    pr_cmd,
-                                    cwd='/home/johba/OpenHands',
+                                pr_result = run_logged_command(
+                                    cmd=pr_cmd,
+                                    log_path=pr_log_file,
+                                    cwd=str(REPO_ROOT),
                                     env=env,
-                                    capture_output=True,
-                                    text=True,
-                                    timeout=300  # 5 minute timeout for PR creation
+                                    label='PR Command',
+                                    timeout=300,
                                 )
 
                                 if pr_result.returncode == 0:
@@ -245,21 +370,11 @@ def main():
                                     print(f"   ⚠️ PR creation failed (exit code: {pr_result.returncode})")
                                     if pr_result.stderr:
                                         print(f"   Error: {pr_result.stderr[:500]}")
-
-                                # Save PR creation log
-                                pr_log_file = f'output/issue_{issue_num}_pr_log.txt'
-                                with open(pr_log_file, 'w') as f:
-                                    f.write(f"PR Command: {' '.join(pr_cmd)}\n")
-                                    f.write(f"Return code: {pr_result.returncode}\n\n")
-                                    f.write("STDOUT:\n")
-                                    f.write(pr_result.stdout)
-                                    f.write("\nSTDERR:\n")
-                                    f.write(pr_result.stderr)
-
                             except subprocess.TimeoutExpired:
                                 print(f"   ⚠️ PR creation timed out after 5 minutes")
                             except Exception as e:
                                 print(f"   ⚠️ PR creation error: {str(e)}")
+                                print(f"   See log: {pr_log_file}")
                         else:
                             print(f"❌ Failed to process issue #{issue_num} (exit code: {result.returncode})")
                             if result.stderr:

@@ -130,6 +130,7 @@ env.bak/
 .env.bak
 venv.bak/
 *venv/
+poll_env.sh
 
 # Spyder project settings
 .spyderproject

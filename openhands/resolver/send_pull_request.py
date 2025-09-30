@@ -21,6 +21,7 @@ from openhands.resolver.io_utils import (
     load_single_resolver_output,
 )
 from openhands.resolver.patching import apply_diff, parse_patch
+from openhands.resolver.patching.exceptions import HunkApplyException
 from openhands.resolver.resolver_output import ResolverOutput
 from openhands.resolver.utils import identify_token
 from openhands.utils.async_utils import GENERAL_TIMEOUT, call_async_from_sync
@@ -35,6 +36,28 @@ def apply_patch(repo_dir: str, patch: str) -> None:
         repo_dir: The directory containing the repository
         patch: The patch to apply
     """
+    git_apply = subprocess.run(
+        [
+            "git",
+            "apply",
+            "--3way",
+            "--whitespace=nowarn",
+        ],
+        cwd=repo_dir,
+        input=patch,
+        text=True,
+        capture_output=True,
+    )
+
+    if git_apply.returncode == 0:
+        logger.info("Patch applied successfully via git apply --3way")
+        return
+
+    logger.warning(
+        "git apply --3way failed (%s). Falling back to manual patch application.",
+        git_apply.stderr.strip() or git_apply.stdout.strip() or "unknown error",
+    )
+
     diffs = parse_patch(patch)
     for diff in diffs:
         if not diff.header.new_path:
@@ -111,7 +134,11 @@ def apply_patch(repo_dir: str, patch: str) -> None:
             logger.warning(f'No changes to apply for {old_path}')
             continue
 
-        new_content = apply_diff(diff, split_content)
+        try:
+            new_content = apply_diff(diff, split_content)
+        except HunkApplyException as exc:
+            logger.error("Manual patch application failed: %s", exc)
+            raise
 
         # Ensure the directory exists before writing the file
         os.makedirs(os.path.dirname(new_path), exist_ok=True)
