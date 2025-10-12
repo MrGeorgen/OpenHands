@@ -4,6 +4,7 @@ import time
 import warnings
 from functools import partial
 from typing import Any, Callable, cast
+from uuid import uuid4
 
 import httpx
 
@@ -109,6 +110,8 @@ class LLM(RetryMixin, DebugMixin):
         else:
             self.tokenizer = None
 
+        self._chatgpt_conversation_id: str | None = None
+
         # set up the completion function
         kwargs: dict[str, Any] = {
             'temperature': self.config.temperature,
@@ -121,6 +124,25 @@ class LLM(RetryMixin, DebugMixin):
         if self.config.top_p is not None:
             # openai doesn't expose top_p, but litellm does
             kwargs['top_p'] = self.config.top_p
+
+        extra_headers: dict[str, str] = {}
+        if self.config.openai_auth_mode and self.config.openai_auth_mode.lower() == 'chatgpt':
+            if not self.config.base_url:
+                self.config.base_url = 'https://chatgpt.com/backend-api/codex'
+            conversation_id = str(uuid4())
+            self._chatgpt_conversation_id = conversation_id
+            extra_headers.update(
+                {
+                    'OpenAI-Beta': 'responses=experimental',
+                    'conversation_id': conversation_id,
+                    'session_id': conversation_id,
+                }
+            )
+            if self.config.chatgpt_account_id:
+                extra_headers['chatgpt-account-id'] = self.config.chatgpt_account_id
+            existing_headers = kwargs.get('extra_headers', {}) or {}
+            merged_headers = {**existing_headers, **extra_headers}
+            kwargs['extra_headers'] = merged_headers
 
         # Handle OpenHands provider - rewrite to litellm_proxy
         if self.config.model.startswith('openhands/'):

@@ -944,6 +944,17 @@ max_events = 15
     assert agent_config.condenser.max_events == 15
 
 
+def test_load_from_env_sets_chatgpt_auth(monkeypatch):
+    config = OpenHandsConfig()
+    monkeypatch.setenv('LLM_OPENAI_AUTH_MODE', 'chatgpt')
+    monkeypatch.setenv('LLM_CHATGPT_ACCOUNT_ID', 'acct_123')
+
+    load_from_env(config, os.environ)
+    llm_config = config.get_llm_config()
+    assert llm_config.openai_auth_mode == 'chatgpt'
+    assert llm_config.chatgpt_account_id == 'acct_123'
+
+
 def test_api_keys_repr_str():
     # Test LLMConfig
     llm_config = LLMConfig(

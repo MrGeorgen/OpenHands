@@ -768,11 +768,21 @@ def main() -> None:
     )
 
     api_key = my_args.llm_api_key or os.environ['LLM_API_KEY']
-    llm_config = LLMConfig(
-        model=my_args.llm_model or os.environ['LLM_MODEL'],
-        api_key=SecretStr(api_key) if api_key else None,
-        base_url=my_args.llm_base_url or os.environ.get('LLM_BASE_URL', None),
-    )
+    llm_kwargs: dict[str, object] = {
+        'model': my_args.llm_model or os.environ['LLM_MODEL'],
+        'api_key': SecretStr(api_key) if api_key else None,
+        'base_url': my_args.llm_base_url or os.environ.get('LLM_BASE_URL', None),
+    }
+
+    openai_auth_mode = os.environ.get('LLM_OPENAI_AUTH_MODE')
+    if openai_auth_mode:
+        llm_kwargs['openai_auth_mode'] = openai_auth_mode
+
+    chatgpt_account_id = os.environ.get('LLM_CHATGPT_ACCOUNT_ID')
+    if chatgpt_account_id:
+        llm_kwargs['chatgpt_account_id'] = chatgpt_account_id
+
+    llm_config = LLMConfig(**llm_kwargs)
 
     if not os.path.exists(my_args.output_dir):
         raise ValueError(f'Output directory {my_args.output_dir} does not exist.')

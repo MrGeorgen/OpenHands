@@ -2,16 +2,21 @@
 import os
 import time
 import subprocess
-import httpx
 import json
 import re
 import shutil
 from datetime import datetime
 from pathlib import Path
 from threading import Thread
+import atexit
+import signal
 
+import httpx
+
+from openhands.core.config.utils import load_openhands_config
 
 API_BASE = "https://codeberg.org/api/v1"
+CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 
 def _require_env(name: str) -> str:
     value = os.environ.get(name)
@@ -22,18 +27,101 @@ def _require_env(name: str) -> str:
 
 # Configuration
 FORGEJO_TOKEN = _require_env("FORGEJO_TOKEN")
-LLM_API_KEY = _require_env("LLM_API_KEY")
-LLM_MODEL = _require_env("LLM_MODEL")
+
+USER_CONFIG_FILE = os.path.join(os.path.expanduser('~'), '.openhands', 'config.toml')
+
+
+def _load_llm_env() -> dict[str, str]:
+    cfg = (
+        load_openhands_config(config_file=USER_CONFIG_FILE)
+        if os.path.exists(USER_CONFIG_FILE)
+        else load_openhands_config()
+    )
+    llm_cfg = cfg.get_llm_config()
+
+    model = llm_cfg.model or os.getenv("LLM_MODEL")
+    api_key = (
+        llm_cfg.api_key.get_secret_value() if llm_cfg.api_key else os.getenv("LLM_API_KEY")
+    )
+    base_url = llm_cfg.base_url or os.getenv("LLM_BASE_URL")
+    auth_mode = llm_cfg.openai_auth_mode or os.getenv("LLM_OPENAI_AUTH_MODE")
+    chatgpt_account_id = (
+        llm_cfg.chatgpt_account_id
+        or os.getenv("LLM_CHATGPT_ACCOUNT_ID")
+        or os.getenv("CHATGPT_ACCOUNT_ID")
+    )
+
+    if not model:
+        raise RuntimeError(
+            "No LLM model configured. Set [llm].model in your config.toml or export LLM_MODEL."
+        )
+    if not api_key:
+        raise RuntimeError(
+            "No LLM API key configured. Set [llm].api_key or export LLM_API_KEY."
+        )
+
+    env: dict[str, str] = {
+        "LLM_MODEL": model,
+        "LLM_API_KEY": api_key,
+    }
+
+    env["LLM_CACHING_PROMPT"] = 'true' if llm_cfg.caching_prompt else 'false'
+
+    uses_codex = "gpt-5-codex" in model.lower()
+
+    if base_url:
+        env["LLM_BASE_URL"] = base_url
+    elif uses_codex:
+        env["LLM_BASE_URL"] = CODEX_BASE_URL
+
+    if auth_mode:
+        env["LLM_OPENAI_AUTH_MODE"] = auth_mode
+    elif uses_codex:
+        env["LLM_OPENAI_AUTH_MODE"] = "chatgpt"
+
+    if env.get("LLM_OPENAI_AUTH_MODE") == "chatgpt":
+        if not chatgpt_account_id:
+            raise RuntimeError(
+                "ChatGPT OAuth requires an account id. Configure [llm].chatgpt_account_id "
+                "or export CHATGPT_ACCOUNT_ID."
+            )
+        env["LLM_CHATGPT_ACCOUNT_ID"] = chatgpt_account_id
+
+    return env
+
+
+LLM_ENV = _load_llm_env()
+
+for key, value in LLM_ENV.items():
+    os.environ.setdefault(key, value)
+
+if os.path.exists(USER_CONFIG_FILE):
+    os.environ.setdefault("OPENHANDS_CONFIG_FILE", USER_CONFIG_FILE)
+
 REPO = "johba/harb"
 PROCESSED_FILE = ".processed_issues.json"
 REPO_ROOT = Path(__file__).resolve().parent
 POLL_INTERVAL = 300  # 5 minutes
 LABEL_TO_WATCH = "fix-me"  # Change this to your preferred label
+CURRENT_MCP_PROCESS: subprocess.Popen | None = None
+
+MCP_SERVER_CMD = [
+    "npx",
+    "@playwright/mcp@latest",
+    "--browser",
+    "chromium",
+    "--headless",
+    "--port",
+    "3904",
+]
+MCP_HEALTH_URL = "http://127.0.0.1:3904/shttp"
 
 # Propagate to subprocess environment
-os.environ["LLM_API_KEY"] = LLM_API_KEY
-os.environ["LLM_MODEL"] = LLM_MODEL
 os.environ["FORGEJO_TOKEN"] = FORGEJO_TOKEN
+
+# Convenience aliases for local usage
+LLM_MODEL = os.environ["LLM_MODEL"]
+LLM_API_KEY = os.environ["LLM_API_KEY"]
 
 
 def sanitize_command(cmd):
@@ -254,9 +342,79 @@ def ensure_prerequisites():
     if shutil.which("tmux") is None:
         raise RuntimeError("tmux is required but was not found in PATH. Install it (e.g. apt install tmux) before running.")
 
+def start_playwright_mcp() -> subprocess.Popen | None:
+    try:
+        httpx.get(MCP_HEALTH_URL, timeout=2)
+        print("Playwright MCP already running.")
+        return None
+    except httpx.HTTPError:
+        pass
+    try:
+        proc = subprocess.Popen(
+            MCP_SERVER_CMD,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        safe_pid = proc.pid
+        os.environ["OPENHANDS_MCP_PLAYWRIGHT_PID"] = str(safe_pid)
+        print(f"Started Playwright MCP (PID {safe_pid}).")
+
+        def _log_stream(stream, prefix):
+            if stream is None:
+                return
+            for line in stream:
+                print(f"[MCP-{prefix}] {line.rstrip()}")
+
+        Thread(target=_log_stream, args=(proc.stdout, "stdout"), daemon=True).start()
+        Thread(target=_log_stream, args=(proc.stderr, "stderr"), daemon=True).start()
+
+        for _ in range(30):
+            try:
+                httpx.get(MCP_HEALTH_URL, timeout=1)
+                break
+            except httpx.HTTPError:
+                time.sleep(1)
+        else:
+            stop_playwright_mcp(proc)
+            raise RuntimeError("Playwright MCP did not become ready in time.")
+
+        return proc
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "Failed to launch Playwright MCP. Ensure Node.js >= 18 and npx are installed."
+        ) from exc
+
+
+def stop_playwright_mcp(proc: subprocess.Popen | None) -> None:
+    if proc is None:
+        pid_env = os.environ.get("OPENHANDS_MCP_PLAYWRIGHT_PID")
+        if pid_env:
+            try:
+                os.kill(int(pid_env), signal.SIGTERM)
+                print(f"Stopped Playwright MCP (PID {pid_env}).")
+            except OSError:
+                pass
+            finally:
+                os.environ.pop("OPENHANDS_MCP_PLAYWRIGHT_PID", None)
+        return
+    if proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    os.environ.pop("OPENHANDS_MCP_PLAYWRIGHT_PID", None)
+    print("Playwright MCP stopped.")
+
 
 def main():
     ensure_prerequisites()
+    mcp_proc = start_playwright_mcp()
+    global CURRENT_MCP_PROCESS
+    CURRENT_MCP_PROCESS = mcp_proc
+    if mcp_proc is not None:
+        atexit.register(lambda: stop_playwright_mcp(mcp_proc))
     processed = load_processed()
     ensure_processed_log_exists(processed)
     workspace_base = Path(os.environ.get("WORKSPACE_BASE") or Path.home() / "workspace")
@@ -417,6 +575,9 @@ def main():
 
         except KeyboardInterrupt:
             print("\n👋 Stopping polling script")
+            if CURRENT_MCP_PROCESS is not None:
+                stop_playwright_mcp(CURRENT_MCP_PROCESS)
+                CURRENT_MCP_PROCESS = None
             break
         except Exception as e:
             print(f"❌ Error: {e}")

@@ -47,6 +47,24 @@ def test_llm_init_with_default_config(default_config):
     assert llm.metrics.model_name == 'gpt-4o'
 
 
+@patch('openhands.llm.llm.litellm_completion')
+def test_chatgpt_oauth_headers_injected(mock_litellm_completion):
+    config = LLMConfig(
+        model='gpt-5-codex',
+        api_key='oauth-access-token',
+        openai_auth_mode='chatgpt',
+        chatgpt_account_id='acct_123',
+    )
+    llm = LLM(config, service_id='chatgpt-service')
+
+    extra_headers = llm._completion_unwrapped.keywords.get('extra_headers')
+    assert extra_headers is not None
+    assert extra_headers['OpenAI-Beta'] == 'responses=experimental'
+    assert extra_headers['chatgpt-account-id'] == 'acct_123'
+    assert extra_headers['conversation_id'] == extra_headers['session_id']
+    assert llm.config.base_url == 'https://chatgpt.com/backend-api/codex'
+
+
 def test_token_usage_add():
     """Test that TokenUsage instances can be added together."""
     # Create two TokenUsage instances

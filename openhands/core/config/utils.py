@@ -5,7 +5,7 @@ import platform
 import sys
 from ast import literal_eval
 from types import UnionType
-from typing import Any, MutableMapping, get_args, get_origin, get_type_hints
+from typing import Any, MutableMapping, get_args, get_origin, get_type_hints, Literal
 from uuid import uuid4
 
 import toml
@@ -55,7 +55,8 @@ def load_from_env(
         """Returns the non-None type from a Union."""
         if union_type is None:
             return None
-        if get_origin(union_type) is UnionType:
+        origin = get_origin(union_type)
+        if origin is UnionType or (origin is not None and type(None) in get_args(union_type)):
             types = get_args(union_type)
             return next((t for t in types if t is not type(None)), None)
         if isinstance(union_type, type):
@@ -87,11 +88,22 @@ def load_from_env(
 
                 try:
                     # if it's an optional type, get the non-None type
-                    if get_origin(field_type) is UnionType:
+                    origin_type = get_origin(field_type)
+                    if origin_type is UnionType or (
+                        origin_type is not None and type(None) in get_args(field_type)
+                    ):
                         field_type = get_optional_type(field_type)
 
+                    # Handle Literal types (e.g., Literal['chatgpt'])
+                    if get_origin(field_type) is Literal:
+                        literal_args = get_args(field_type)
+                        if value not in literal_args:
+                            raise ValueError(
+                                f'Invalid value {value!r} for {env_var_name}. Allowed: {literal_args}'
+                            )
+                        cast_value = value
                     # Attempt to cast the env var to type hinted in the dataclass
-                    if field_type is bool:
+                    elif field_type is bool:
                         cast_value = str(value).lower() in ['true', '1']
                     # parse dicts and lists like SANDBOX_RUNTIME_STARTUP_ENV_VARS and SANDBOX_RUNTIME_EXTRA_BUILD_ARGS
                     elif (

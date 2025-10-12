@@ -110,6 +110,12 @@
 # API key to use (For Headless / CLI only -  In Web this is overridden by Session Init)
 api_key = ""
 
+# Set to "chatgpt" to send OAuth tokens (from chatgpt.com) instead of API keys.
+#openai_auth_mode = "chatgpt"
+
+# Optional account identifier header for ChatGPT OAuth requests.
+#chatgpt_account_id = ""
+
 # API base URL (For Headless / CLI only -  In Web this is overridden by Session Init)
 #base_url = ""
 

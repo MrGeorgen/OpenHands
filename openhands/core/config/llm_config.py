@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
 
@@ -47,6 +47,8 @@ class LLMConfig(BaseModel):
         seed: The seed to use for the LLM.
         safety_settings: Safety settings for models that support them (like Mistral AI and Gemini).
         for_routing: Whether this LLM is used for routing. This is set to True for models used in conjunction with the main LLM in the model routing feature.
+        openai_auth_mode: Controls how OpenHands authenticates with OpenAI. Set to "chatgpt" to send OAuth access tokens instead of API keys.
+        chatgpt_account_id: Optional account identifier to forward via the `chatgpt-account-id` header when using ChatGPT OAuth tokens.
     """
 
     model: str = Field(default='claude-sonnet-4-20250514')
@@ -94,6 +96,8 @@ class LLMConfig(BaseModel):
         description='Safety settings for models that support them (like Mistral AI and Gemini)',
     )
     for_routing: bool = Field(default=False)
+    openai_auth_mode: Literal['api_key', 'chatgpt'] | None = Field(default=None)
+    chatgpt_account_id: str | None = Field(default=None)
 
     model_config = ConfigDict(extra='forbid')
 

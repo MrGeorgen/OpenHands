@@ -100,6 +100,11 @@ class ForgejoIssueHandler(IssueHandlerInterface):
         while True:
             params = {'state': 'open', 'limit': '50', 'page': str(page)}
             response = httpx.get(self.download_url, headers=self.headers, params=params)
+            if response.status_code == 429:
+                logger.warning(
+                    'Forgejo issues API returned 429 Too Many Requests; stopping pagination.'
+                )
+                break
             response.raise_for_status()
             issues = response.json()
 
@@ -128,6 +133,11 @@ class ForgejoIssueHandler(IssueHandlerInterface):
 
         while True:
             response = httpx.get(url, headers=self.headers, params=params)
+            if response.status_code == 429:
+                logger.warning(
+                    'Forgejo comments API returned 429 Too Many Requests; stopping pagination.'
+                )
+                break
             response.raise_for_status()
             comments = response.json()
 
