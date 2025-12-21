@@ -1,0 +1,5 @@
+{% if pr_comment %}
+{{ pr_comment }}
+{% else %}
+Please address the PR review comment(s) for PR #{{ pr_number }}.
+{% endif %}

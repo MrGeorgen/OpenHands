@@ -78,6 +78,16 @@ class SuggestedTask(BaseModel):
                 'ciProvider': 'Bitbucket',
                 'requestVerb': 'pull request',
             }
+        elif self.git_provider == ProviderType.FORGEJO:
+            return {
+                'requestType': 'Pull Request',
+                'requestTypeShort': 'PR',
+                'apiName': 'Forgejo API',
+                'tokenEnvVar': 'FORGEJO_TOKEN',
+                'ciSystem': 'CI',
+                'ciProvider': 'Forgejo',
+                'requestVerb': 'pull request',
+            }
 
         raise ValueError(f'Provider {self.git_provider} for suggested task prompts')
 
