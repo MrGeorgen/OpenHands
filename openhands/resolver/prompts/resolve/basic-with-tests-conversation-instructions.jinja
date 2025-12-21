@@ -9,3 +9,4 @@ Run the tests, and if they pass you are done!
 You do NOT need to write new tests if there are only changes to documentation or configuration files.
 
 When you think you have fixed the issue through code changes, please call the finish action to end the interaction.
+IMPORTANT: Use the configured git provider end-to-end. Do NOT default to GitHub if another provider is selected. When accessing provider credentials in the environment, check provider-specific variables: $github_token, $gitlab_token, $bitbucket_token, $forgejo_token, or $azure_devops_token. For Forgejo instances, use the configured host/base domain and Forgejo APIs for PRs/branches instead of GitHub endpoints.
